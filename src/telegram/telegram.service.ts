@@ -9,11 +9,13 @@ type FlowStep =
   | 'dep_type'
   | 'dep_concept'
   | 'dep_amount'
+  | 'hist_date'
   | 'hist_who'
   | 'hist_person'
   | 'hist_concept'
   | 'hist_amount'
   | 'hist_status'
+  | 'gp_date'
   | 'gp_concept'
   | 'gp_amount';
 
@@ -79,6 +81,12 @@ export class TelegramService {
       }
 
       // ── Historial ──────────────────────────────────────────────────
+      case 'hist_date':
+        state.date = this.parseDate(t);
+        state.step = 'hist_who';
+        await this.askHistWho(ctx);
+        break;
+
       case 'hist_person':
         state.person = t;
         state.step = 'hist_concept';
@@ -101,6 +109,12 @@ export class TelegramService {
       }
 
       // ── Gastos personales ──────────────────────────────────────────
+      case 'gp_date':
+        state.date = this.parseDate(t);
+        state.step = 'gp_concept';
+        await this.askConcept(ctx);
+        break;
+
       case 'gp_concept':
         state.concept = t;
         state.step = 'gp_amount';
@@ -129,13 +143,13 @@ export class TelegramService {
         state.tab = value as FlowState['tab'];
         if (value === 'departamento') {
           state.step = 'dep_date';
-          await this.askDepDate(ctx);
+          await this.askDate(ctx, 'dep_date');
         } else if (value === 'historial') {
-          state.step = 'hist_who';
-          await this.askHistWho(ctx);
+          state.step = 'hist_date';
+          await this.askDate(ctx, 'hist_date');
         } else {
-          state.step = 'gp_concept';
-          await this.askConcept(ctx);
+          state.step = 'gp_date';
+          await this.askDate(ctx, 'gp_date');
         }
         break;
 
@@ -143,6 +157,18 @@ export class TelegramService {
         state.date = this.today();
         state.step = 'dep_type';
         await this.askDepType(ctx);
+        break;
+
+      case 'hist_date':
+        state.date = this.today();
+        state.step = 'hist_who';
+        await this.askHistWho(ctx);
+        break;
+
+      case 'gp_date':
+        state.date = this.today();
+        state.step = 'gp_concept';
+        await this.askConcept(ctx);
         break;
 
       case 'dep_type':
@@ -180,11 +206,11 @@ export class TelegramService {
     );
   }
 
-  private async askDepDate(ctx: Context): Promise<void> {
+  private async askDate(ctx: Context, actionKey: string): Promise<void> {
     await ctx.reply(
       `📅 ¿Cuál es la fecha del registro?\n\nEscribe en formato DD/MM/YYYY o toca el botón:`,
       Markup.inlineKeyboard([
-        [Markup.button.callback(`✅ Hoy — ${this.today()}`, 'flow:dep_date:today')],
+        [Markup.button.callback(`✅ Hoy — ${this.today()}`, `flow:${actionKey}:today`)],
       ]),
     );
   }
