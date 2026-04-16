@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
-import { SheetsService, PendingDebt, PersonDebtSummary, RecurringExpense } from '../sheets/sheets.service';
+import { SheetsService, PendingDebt, PersonDebtSummary, RecurringExpense, SplitEvent, SplitExpense } from '../sheets/sheets.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
@@ -22,10 +22,21 @@ type FlowStep =
   | 'gf_concept'
   | 'gf_amount'
   | 'gf_day'
-  | 'gf_advance';
+  | 'gf_advance'
+  | 'split_create_name'
+  | 'split_create_members'
+  | 'split_wait_add'
+  | 'split_wait_who'
+  | 'split_add_concept'
+  | 'split_add_amount'
+  | 'split_wait_calc'
+  | 'split_wait_close';
 
 // Steps that require a button tap — text input is ignored
-const BUTTON_STEPS: FlowStep[] = ['action', 'main', 'dep_type', 'hist_who', 'hist_status'];
+const BUTTON_STEPS: FlowStep[] = [
+  'action', 'main', 'dep_type', 'hist_who', 'hist_status',
+  'split_wait_add', 'split_wait_who', 'split_wait_calc', 'split_wait_close',
+];
 
 interface FlowState {
   step: FlowStep;
@@ -39,6 +50,10 @@ interface FlowState {
   status?: 'Pagada' | 'Pendiente';
   dayOfMonth?: number;
   daysInAdvance?: number;
+  splitEventId?: number;
+  splitEventName?: string;
+  splitParticipants?: string[];
+  splitWho?: string;
 }
 
 @Injectable()
@@ -174,6 +189,71 @@ export class TelegramService {
         await this.saveRecurring(userId, state, ctx);
         break;
       }
+
+      // ── Split ──────────────────────────────────────────────────────
+      case 'split_create_name':
+        state.splitEventName = t;
+        state.step = 'split_create_members';
+        await ctx.reply(
+          '👥 ¿Quiénes participan? Escríbelos separados por coma.\n\nEj: Yo, Pepe, Juan, Maria',
+        );
+        break;
+
+      case 'split_create_members': {
+        const participants = t.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+        if (participants.length < 2) {
+          await ctx.reply('⚠️ Necesitas al menos 2 participantes.');
+          return;
+        }
+        const eventId = await this.sheetsService.createSplitEvent(state.splitEventName!, participants);
+        this.flows.delete(userId);
+        await ctx.reply(
+          `✅ *Evento creado*\n\n📌 ${state.splitEventName}\n👥 ${participants.join(', ')}\n\nYa puedes agregar gastos desde el menú "🍕 Dividir gastos".`,
+          { parse_mode: 'Markdown' },
+        );
+        // Show quick actions
+        await ctx.reply(
+          '¿Quieres agregar el primer gasto ahora?',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💸 Agregar gasto', `flow:split_add_event:${eventId}`)],
+            [Markup.button.callback('✅ Después', 'flow:again:no')],
+          ]),
+        );
+        break;
+      }
+
+      case 'split_add_concept':
+        state.concept = t;
+        state.step = 'split_add_amount';
+        await this.askAmount(ctx);
+        break;
+
+      case 'split_add_amount': {
+        const n = this.parseAmount(t);
+        if (!n) { await this.badAmount(ctx); return; }
+        await this.sheetsService.addSplitExpense({
+          eventRowIndex: state.splitEventId!,
+          paidBy: state.splitWho!,
+          concept: state.concept!,
+          amount: n,
+          date: this.today(),
+        });
+        const fmt = (x: number) => `$${x.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+        this.flows.delete(userId);
+        await ctx.reply(
+          `✅ *Gasto agregado*\n👤 ${state.splitWho} pagó ${fmt(n)}\n📝 ${state.concept}`,
+          { parse_mode: 'Markdown' },
+        );
+        await ctx.reply(
+          '¿Qué hacemos?',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💸 Agregar otro gasto', `flow:split_add_event:${state.splitEventId}`)],
+            [Markup.button.callback('🧮 Calcular', `flow:split_calc_event:${state.splitEventId}`)],
+            [Markup.button.callback('✅ Terminar', 'flow:again:no')],
+          ]),
+        );
+        break;
+      }
     }
   }
 
@@ -204,6 +284,9 @@ export class TelegramService {
       } else if (value === 'gastos_fijos') {
         this.flows.set(userId, { step: 'gf_concept' });
         await ctx.reply('📝 ¿Cuál es el nombre del gasto fijo? (ej: Netflix, Gym, Renta)');
+      } else if (value === 'dividir') {
+        this.flows.set(userId, { step: 'action' });
+        await this.askSplitMenu(ctx);
       } else {
         this.flows.delete(userId);
         await this.showPendingDebts(ctx);
@@ -248,6 +331,75 @@ export class TelegramService {
 
     if (key === 'ignore_fixed') {
       await ctx.reply('⏭️ Recordatorio ignorado.');
+      return;
+    }
+
+    if (key === 'split_sub') {
+      if (value === 'crear') {
+        this.flows.set(userId, { step: 'split_create_name' });
+        await ctx.reply('📌 ¿Cuál es el nombre del evento? (ej: Comida cumple Ana)');
+      } else if (value === 'agregar') {
+        await this.askSplitEventSelect(userId, 'split_wait_add', 'split_add_event', ctx);
+      } else if (value === 'calcular') {
+        await this.askSplitEventSelect(userId, 'split_wait_calc', 'split_calc_event', ctx);
+      } else if (value === 'cerrar') {
+        await this.askSplitEventSelect(userId, 'split_wait_close', 'split_close', ctx);
+      }
+      return;
+    }
+
+    if (key === 'split_add_event') {
+      const eventId = parseInt(value);
+      const event = await this.sheetsService.getSplitEvent(eventId);
+      if (!event) { await ctx.reply('⚠️ Evento no encontrado.'); return; }
+      this.flows.set(userId, {
+        step: 'split_wait_who',
+        splitEventId: eventId,
+        splitEventName: event.name,
+        splitParticipants: event.participants,
+      });
+      await ctx.reply(
+        `💸 *${event.name}*\n¿Quién pagó?`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard(
+            event.participants.map((p) => [Markup.button.callback(p, `flow:split_who:${p}`)]),
+          ),
+        },
+      );
+      return;
+    }
+
+    if (key === 'split_who') {
+      const state = this.flows.get(userId);
+      if (!state) return;
+      state.splitWho = value;
+      state.step = 'split_add_concept';
+      await this.askConcept(ctx);
+      return;
+    }
+
+    if (key === 'split_calc_event') {
+      const eventId = parseInt(value);
+      await this.showSplitCalculation(userId, eventId, ctx);
+      return;
+    }
+
+    if (key === 'split_saveall') {
+      const eventId = parseInt(value);
+      await this.saveSplitToHistorial(eventId, ctx);
+      return;
+    }
+
+    if (key === 'split_close') {
+      const eventId = parseInt(value);
+      try {
+        await this.sheetsService.closeSplitEvent(eventId);
+        this.flows.delete(userId);
+        await ctx.reply('🔒 Evento cerrado.');
+      } catch {
+        await ctx.reply('⚠️ No pude cerrar el evento. Intenta de nuevo.');
+      }
       return;
     }
 
@@ -494,6 +646,174 @@ export class TelegramService {
     await ctx.reply(msg.trim(), { parse_mode: 'Markdown' });
   }
 
+  // ── Split helpers ──────────────────────────────────────────────────────────
+
+  private async askSplitMenu(ctx: Context): Promise<void> {
+    await ctx.reply(
+      '🍕 *Dividir gastos* — ¿qué quieres hacer?',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('➕ Crear evento', 'flow:split_sub:crear')],
+          [
+            Markup.button.callback('💸 Agregar gasto', 'flow:split_sub:agregar'),
+            Markup.button.callback('🧮 Calcular', 'flow:split_sub:calcular'),
+          ],
+          [Markup.button.callback('🔒 Cerrar evento', 'flow:split_sub:cerrar')],
+        ]),
+      },
+    );
+  }
+
+  private async askSplitEventSelect(
+    userId: number,
+    waitStep: FlowStep,
+    actionKey: string,
+    ctx: Context,
+  ): Promise<void> {
+    const events = await this.sheetsService.getOpenSplitEvents();
+    if (events.length === 0) {
+      await ctx.reply('No hay eventos abiertos. Crea uno primero con "➕ Crear evento".');
+      return;
+    }
+    this.flows.set(userId, { step: waitStep });
+    await ctx.reply(
+      '📋 Selecciona el evento:',
+      Markup.inlineKeyboard(
+        events.map((e: SplitEvent) => [
+          Markup.button.callback(`📌 ${e.name}`, `flow:${actionKey}:${e.rowIndex}`),
+        ]),
+      ),
+    );
+  }
+
+  private async showSplitCalculation(
+    userId: number,
+    eventId: number,
+    ctx: Context,
+  ): Promise<void> {
+    this.flows.delete(userId);
+
+    const [event, expenses] = await Promise.all([
+      this.sheetsService.getSplitEvent(eventId),
+      this.sheetsService.getSplitExpenses(eventId),
+    ]);
+
+    if (!event) { await ctx.reply('⚠️ Evento no encontrado.'); return; }
+    if (expenses.length === 0) {
+      await ctx.reply('⚠️ Este evento no tiene gastos registrados aún.');
+      return;
+    }
+
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+    const total = expenses.reduce((s: number, e: SplitExpense) => s + e.amount, 0);
+    const share = total / event.participants.length;
+    const settlements = this.calculateSettlements(event.participants, expenses);
+
+    let msg = `🧮 *${event.name}*\n\n`;
+    msg += `👥 ${event.participants.join(', ')}\n`;
+    msg += `💵 Total: ${fmt(total)} | Parte de cada quien: ${fmt(share)}\n\n`;
+
+    // Show what each person paid
+    const paid: Record<string, number> = {};
+    for (const e of expenses) paid[e.paidBy] = (paid[e.paidBy] ?? 0) + e.amount;
+    msg += `*Lo que pagó cada quien:*\n`;
+    for (const p of event.participants) {
+      msg += `  • ${p}: ${fmt(paid[p] ?? 0)}\n`;
+    }
+
+    msg += `\n*Liquidación:*\n`;
+    if (settlements.length === 0) {
+      msg += '✅ ¡Todos están a mano!';
+    } else {
+      for (const s of settlements) {
+        msg += `  💸 ${s.from} → ${s.to}: ${fmt(s.amount)}\n`;
+      }
+    }
+
+    const buttons = settlements.length > 0
+      ? Markup.inlineKeyboard([
+          [Markup.button.callback('💾 Guardar en Historial', `flow:split_saveall:${eventId}`)],
+          [Markup.button.callback('🔒 Cerrar evento', `flow:split_close:${eventId}`)],
+          [Markup.button.callback('❌ No guardar', 'flow:ignore_fixed:ok')],
+        ])
+      : Markup.inlineKeyboard([
+          [Markup.button.callback('🔒 Cerrar evento', `flow:split_close:${eventId}`)],
+          [Markup.button.callback('✅ Listo', 'flow:ignore_fixed:ok')],
+        ]);
+
+    await ctx.reply(msg.trim(), { parse_mode: 'Markdown', ...buttons });
+  }
+
+  private calculateSettlements(
+    participants: string[],
+    expenses: { paidBy: string; amount: number }[],
+  ): { from: string; to: string; amount: number }[] {
+    const total = expenses.reduce((s, e) => s + e.amount, 0);
+    const share = total / participants.length;
+
+    const balances: Record<string, number> = {};
+    for (const p of participants) balances[p] = -share;
+    for (const e of expenses) {
+      balances[e.paidBy] = (balances[e.paidBy] ?? -share) + e.amount;
+    }
+
+    const debtors = Object.entries(balances)
+      .filter(([, b]) => b < -0.01)
+      .map(([name, balance]) => ({ name, balance }))
+      .sort((a, b) => a.balance - b.balance);
+
+    const creditors = Object.entries(balances)
+      .filter(([, b]) => b > 0.01)
+      .map(([name, balance]) => ({ name, balance }))
+      .sort((a, b) => b.balance - a.balance);
+
+    const settlements: { from: string; to: string; amount: number }[] = [];
+    let i = 0, j = 0;
+
+    while (i < debtors.length && j < creditors.length) {
+      const amount = Math.min(-debtors[i].balance, creditors[j].balance);
+      const rounded = Math.round(amount * 100) / 100;
+      settlements.push({ from: debtors[i].name, to: creditors[j].name, amount: rounded });
+      debtors[i].balance += amount;
+      creditors[j].balance -= amount;
+      if (Math.abs(debtors[i].balance) < 0.01) i++;
+      if (Math.abs(creditors[j].balance) < 0.01) j++;
+    }
+
+    return settlements;
+  }
+
+  private async saveSplitToHistorial(eventId: number, ctx: Context): Promise<void> {
+    const [event, expenses] = await Promise.all([
+      this.sheetsService.getSplitEvent(eventId),
+      this.sheetsService.getSplitExpenses(eventId),
+    ]);
+
+    if (!event) { await ctx.reply('⚠️ Evento no encontrado.'); return; }
+
+    const settlements = this.calculateSettlements(event.participants, expenses);
+    const today = this.today();
+
+    for (const s of settlements) {
+      const expense: ParsedExpenseDto = {
+        tab: 'historial',
+        type: 'ingreso',
+        amount: s.amount,
+        description: `Split: ${event.name} (→ ${s.to})`,
+        date: today,
+        person: s.from,
+        debtDirection: 'me_debe',
+        status: 'Pendiente',
+      };
+      await this.sheetsService.appendExpense(expense);
+    }
+
+    await ctx.reply(
+      `✅ ${settlements.length} deuda(s) guardada(s) en Historial.\nPuedes marcarlas como pagadas con /pagar cuando se liquiden.`,
+    );
+  }
+
   // ── Prompts ────────────────────────────────────────────────────────────────
 
   private async askMain(userId: number, ctx: Context): Promise<void> {
@@ -504,6 +824,7 @@ export class TelegramService {
         [Markup.button.callback('➕ Anotar un movimiento', 'flow:action:registro')],
         [Markup.button.callback('✏️ Actualizar un registro', 'flow:action:actualizar')],
         [Markup.button.callback('⏰ Agregar gasto fijo', 'flow:action:gastos_fijos')],
+        [Markup.button.callback('🍕 Dividir gastos', 'flow:action:dividir')],
       ]),
     );
   }

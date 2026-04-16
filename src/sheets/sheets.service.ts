@@ -25,6 +25,22 @@ export interface PendingDebt {
   isMeDebe: boolean;
 }
 
+export interface SplitEvent {
+  rowIndex: number;
+  name: string;
+  participants: string[];
+  status: 'Abierto' | 'Cerrado';
+  date: string;
+}
+
+export interface SplitExpense {
+  eventRowIndex: number;
+  paidBy: string;
+  concept: string;
+  amount: number;
+  date: string;
+}
+
 export interface RecurringExpense {
   rowIndex: number;
   concept: string;
@@ -713,5 +729,189 @@ export class SheetsService {
         values: [[data.concept, data.amount, data.dayOfMonth, data.daysInAdvance]],
       },
     });
+  }
+
+  // ── Split / dividir gastos ─────────────────────────────────────────────────
+
+  private readonly EVENTOS_TAB = 'Eventos';
+  private readonly SPLITS_TAB = 'Splits';
+
+  private async ensureSplitTabs(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
+    const headerColor = { red: 0.294, green: 0.0, blue: 0.51 };
+
+    for (const { tab, headers } of [
+      { tab: this.EVENTOS_TAB, headers: ['Nombre', 'Participantes', 'Estado', 'Fecha'] },
+      { tab: this.SPLITS_TAB, headers: ['ID Evento', 'Pagó', 'Concepto', 'Monto', 'Fecha'] },
+    ]) {
+      const { sheetId, isNew } = await this.ensureSheetExists(sheets, spreadsheetId, tab);
+      if (!isNew) continue;
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              updateSheetProperties: {
+                properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+                fields: 'gridProperties.frozenRowCount',
+              },
+            },
+            {
+              updateDimensionProperties: {
+                range: { sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 },
+                properties: { pixelSize: 32 },
+                fields: 'pixelSize',
+              },
+            },
+            {
+              repeatCell: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+                cell: {
+                  userEnteredFormat: {
+                    backgroundColor: headerColor,
+                    textFormat: {
+                      bold: true,
+                      fontSize: 11,
+                      foregroundColor: { red: 1, green: 1, blue: 1 },
+                    },
+                    horizontalAlignment: 'CENTER',
+                    verticalAlignment: 'MIDDLE',
+                  },
+                },
+                fields:
+                  'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+              },
+            },
+          ],
+        },
+      });
+
+      await this.writeHeaders(sheets, spreadsheetId, tab, headers);
+    }
+  }
+
+  async getOpenSplitEvents(): Promise<SplitEvent[]> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${this.EVENTOS_TAB}!A:D`,
+      });
+
+      return (res.data.values ?? [])
+        .slice(1)
+        .map((row, i) => ({
+          rowIndex: i + 2,
+          name: String(row[0] ?? ''),
+          participants: String(row[1] ?? '').split(',').map((p) => p.trim()),
+          status: (row[2] ?? 'Abierto') as 'Abierto' | 'Cerrado',
+          date: String(row[3] ?? ''),
+        }))
+        .filter((e) => e.status === 'Abierto' && e.name);
+    } catch {
+      return [];
+    }
+  }
+
+  async getSplitEvent(rowIndex: number): Promise<SplitEvent | null> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${this.EVENTOS_TAB}!A${rowIndex}:D${rowIndex}`,
+      });
+
+      const row = (res.data.values ?? [])[0];
+      if (!row) return null;
+
+      return {
+        rowIndex,
+        name: String(row[0] ?? ''),
+        participants: String(row[1] ?? '').split(',').map((p) => p.trim()),
+        status: (row[2] ?? 'Abierto') as 'Abierto' | 'Cerrado',
+        date: String(row[3] ?? ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async createSplitEvent(name: string, participants: string[]): Promise<number> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await this.ensureSplitTabs(sheets, spreadsheetId);
+
+    const today = new Date().toLocaleDateString('es-MX', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+
+    const res = await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${this.EVENTOS_TAB}!A:D`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[name, participants.join(', '), 'Abierto', today]] },
+    });
+
+    const updatedRange = res.data.updates?.updatedRange ?? '';
+    const match = updatedRange.match(/!([A-Z]+)(\d+)/);
+    return match ? parseInt(match[2]) : 0;
+  }
+
+  async closeSplitEvent(rowIndex: number): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${this.EVENTOS_TAB}!C${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Cerrado']] },
+    });
+  }
+
+  async addSplitExpense(data: SplitExpense): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await this.ensureSplitTabs(sheets, spreadsheetId);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${this.SPLITS_TAB}!A:E`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[data.eventRowIndex, data.paidBy, data.concept, data.amount, data.date]],
+      },
+    });
+  }
+
+  async getSplitExpenses(eventRowIndex: number): Promise<SplitExpense[]> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${this.SPLITS_TAB}!A:E`,
+      });
+
+      return (res.data.values ?? [])
+        .slice(1)
+        .filter((row) => parseInt(String(row[0] ?? '')) === eventRowIndex)
+        .map((row) => ({
+          eventRowIndex,
+          paidBy: String(row[1] ?? ''),
+          concept: String(row[2] ?? ''),
+          amount: parseFloat(String(row[3] ?? '0').replace(/[$,\s]/g, '')) || 0,
+          date: String(row[4] ?? ''),
+        }));
+    } catch {
+      return [];
+    }
   }
 }
