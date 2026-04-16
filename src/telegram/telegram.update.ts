@@ -35,6 +35,7 @@ export class TelegramUpdate {
         '💳 *Gastos personales* — tus gastos del día a día\n\n' +
         '⚡ *Comandos:*\n' +
         '/resumen — ver saldo y deudas pendientes\n' +
+        '/gastos — resumen de gastos personales del mes\n' +
         '/deuda Ricardo — balance pendiente con una persona\n' +
         '/pagar — marcar una deuda como pagada\n' +
         '/cancelar — cancelar el registro en curso',
@@ -54,6 +55,7 @@ export class TelegramUpdate {
         '💳 *Gastos personales* — tus gastos del día a día\n\n' +
         '⚡ *Comandos:*\n' +
         '/resumen — saldo del departamento y deudas pendientes\n' +
+        '/gastos \\[mes\\] — gastos personales del mes \\(ej: /gastos 03\\)\n' +
         '/deuda \\<nombre\\> — balance pendiente con una persona\n' +
         '/pagar — marcar una deuda como pagada\n' +
         '/cancelar — cancelar el registro en curso\n' +
@@ -91,6 +93,20 @@ export class TelegramUpdate {
     } catch (error) {
       this.logger.error('Error al mostrar deudas pendientes', error);
       await ctx.reply('⚠️ No pude obtener las deudas. Intenta de nuevo.');
+    }
+  }
+
+  @Command('gastos')
+  async onGastos(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    try {
+      await ctx.sendChatAction('typing');
+      const text = (ctx.message as { text?: string })?.text ?? '';
+      const arg = text.split(' ').slice(1).join(' ').trim();
+      await this.telegramService.showGastosSummary(arg, ctx);
+    } catch (error) {
+      this.logger.error('Error al mostrar gastos', error);
+      await ctx.reply('⚠️ No pude obtener los gastos. Intenta de nuevo.');
     }
   }
 

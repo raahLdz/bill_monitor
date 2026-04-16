@@ -321,6 +321,49 @@ export class TelegramService {
     );
   }
 
+  async showGastosSummary(input: string, ctx: Context): Promise<void> {
+    const now = new Date();
+    let month = now.getMonth() + 1;
+    let year = now.getFullYear();
+
+    if (input) {
+      // Accept "03", "3", "03/2025", "3/2025"
+      const parts = input.split('/');
+      const parsedMonth = parseInt(parts[0]);
+      if (!isNaN(parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12) {
+        month = parsedMonth;
+        if (parts[1]) {
+          const parsedYear = parseInt(parts[1]);
+          if (!isNaN(parsedYear)) year = parsedYear;
+        }
+      }
+    }
+
+    const summary = await this.sheetsService.getGastosSummary(month, year);
+
+    const monthName = new Date(year, month - 1, 1).toLocaleDateString('es-MX', { month: 'long' });
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+
+    if (!summary) {
+      await ctx.reply(
+        `💳 No encontré gastos personales en *${monthName} ${year}*.`,
+        { parse_mode: 'Markdown' },
+      );
+      return;
+    }
+
+    const { items, total } = summary;
+    let msg = `💳 *Gastos personales — ${monthName} ${year}*\n\n`;
+
+    for (const item of items) {
+      msg += `• ${item.concept} — ${fmt(item.amount)}\n`;
+    }
+
+    msg += `\n💵 *Total: ${fmt(total)}*`;
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  }
+
   async showPersonDebts(personName: string, ctx: Context): Promise<void> {
     if (!personName) {
       await ctx.reply('Escribe el nombre después del comando, por ejemplo:\n/deuda Ricardo');

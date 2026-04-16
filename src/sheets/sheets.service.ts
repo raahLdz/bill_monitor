@@ -500,6 +500,48 @@ export class SheetsService {
     }
   }
 
+  async getGastosSummary(
+    month: number,
+    year: number,
+  ): Promise<{ items: { date: string; concept: string; amount: number }[]; total: number } | null> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Gastos personales!A:C',
+      });
+
+      const values = response.data.values ?? [];
+      const items: { date: string; concept: string; amount: number }[] = [];
+
+      for (let i = 1; i < values.length; i++) {
+        const row = values[i];
+        const dateStr = String(row[0] ?? '');
+        // Expected format DD/MM/YYYY
+        const parts = dateStr.split('/');
+        if (parts.length !== 3) continue;
+        const rowMonth = parseInt(parts[1]);
+        const rowYear = parseInt(parts[2]);
+        if (rowMonth !== month || rowYear !== year) continue;
+
+        const amount = parseFloat(String(row[2] ?? '0').replace(/[$,\s]/g, '')) || 0;
+        if (amount === 0) continue;
+
+        items.push({ date: dateStr, concept: String(row[1] ?? ''), amount });
+      }
+
+      if (items.length === 0) return null;
+
+      items.sort((a, b) => b.amount - a.amount);
+      const total = items.reduce((s, i) => s + i.amount, 0);
+      return { items, total };
+    } catch {
+      return null;
+    }
+  }
+
   async getPersonDebts(personName: string): Promise<PersonDebtSummary | null> {
     try {
       const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
