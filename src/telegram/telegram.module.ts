@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TelegrafModule } from 'nestjs-telegraf';
 import { SheetsModule } from '../sheets/sheets.module';
-import { ClaudeModule } from '../claude/claude.module';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.update';
 
@@ -16,7 +15,6 @@ import { TelegramUpdate } from './telegram.update';
       }),
     }),
     SheetsModule,
-    ClaudeModule,
   ],
   providers: [TelegramService, TelegramUpdate],
 })

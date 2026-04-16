@@ -1,12 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
 import { SheetsService, PendingDebt } from '../sheets/sheets.service';
-import { ClaudeService } from '../claude/claude.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
   | 'action'
-  | 'confirm'
   | 'main'
   | 'dep_date'
   | 'dep_type'
@@ -23,7 +21,7 @@ type FlowStep =
   | 'gp_amount';
 
 // Steps that require a button tap — text input is ignored
-const BUTTON_STEPS: FlowStep[] = ['action', 'confirm', 'main', 'dep_type', 'hist_who', 'hist_status'];
+const BUTTON_STEPS: FlowStep[] = ['action', 'main', 'dep_type', 'hist_who', 'hist_status'];
 
 interface FlowState {
   step: FlowStep;
@@ -35,7 +33,6 @@ interface FlowState {
   person?: string;
   debtDirection?: 'me_debe' | 'le_debo';
   status?: 'Pagada' | 'Pendiente';
-  parsedExpense?: ParsedExpenseDto;
 }
 
 @Injectable()
@@ -43,10 +40,7 @@ export class TelegramService {
   private readonly logger = new Logger(TelegramService.name);
   private readonly flows = new Map<number, FlowState>();
 
-  constructor(
-    private readonly sheetsService: SheetsService,
-    private readonly claudeService: ClaudeService,
-  ) {}
+  constructor(private readonly sheetsService: SheetsService) {}
 
   // ── Public entry points ────────────────────────────────────────────────────
 
@@ -54,12 +48,7 @@ export class TelegramService {
     const state = this.flows.get(userId);
 
     if (!state) {
-      const parsed = await this.claudeService.parseExpenseMessage(text);
-      if (parsed) {
-        await this.askConfirm(userId, parsed, ctx);
-      } else {
-        await this.askMain(userId, ctx);
-      }
+      await this.askMain(userId, ctx);
       return;
     }
 
@@ -167,15 +156,6 @@ export class TelegramService {
     if (!state) return;
 
     switch (key) {
-      case 'confirm':
-        if (value === 'yes' && state.parsedExpense) {
-          await this.save(userId, state, ctx);
-        } else {
-          this.flows.delete(userId);
-          await this.askMain(userId, ctx);
-        }
-        break;
-
       case 'action':
         if (value === 'registro') {
           state.step = 'main';
@@ -323,52 +303,6 @@ export class TelegramService {
     );
   }
 
-  // ── Claude auto-parse confirm ──────────────────────────────────────────────
-
-  private async askConfirm(userId: number, parsed: ParsedExpenseDto, ctx: Context): Promise<void> {
-    this.flows.set(userId, { step: 'confirm', parsedExpense: parsed });
-
-    const tabLabel: Record<string, string> = {
-      departamento: '🏠 Departamento',
-      historial: '📖 Historial',
-      gastos_personales: '💳 Gastos personales',
-    };
-
-    const $ = (n: number) =>
-      `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
-
-    let summary = `🤖 *Detecté este registro:*\n\n`;
-    summary += `📂 ${tabLabel[parsed.tab]}\n`;
-    summary += `📅 ${parsed.date}\n`;
-    summary += `📝 ${parsed.description}\n`;
-    summary += `💵 ${$(parsed.amount)}`;
-
-    if (parsed.tab === 'historial' && parsed.person) {
-      const dir = parsed.debtDirection === 'me_debe'
-        ? `🤝 ${parsed.person} te debe`
-        : `💸 Tú le debes a ${parsed.person}`;
-      summary += `\n📌 ${dir}`;
-      summary += `\n${parsed.status === 'Pagada' ? '✅' : '⏳'} ${parsed.status ?? 'Pendiente'}`;
-    } else if (parsed.tab === 'departamento') {
-      summary += `\n${parsed.type === 'ingreso' ? '💰 Ingreso' : '💸 Egreso'}`;
-    }
-
-    summary += '\n\n¿Lo anoto así?';
-
-    await ctx.reply(
-      summary,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('✅ Sí, guardar', 'flow:confirm:yes'),
-            Markup.button.callback('✏️ No, hacerlo manual', 'flow:confirm:no'),
-          ],
-        ]),
-      },
-    );
-  }
-
   // ── Prompts ────────────────────────────────────────────────────────────────
 
   private async askMain(userId: number, ctx: Context): Promise<void> {
@@ -464,28 +398,22 @@ export class TelegramService {
   private async save(userId: number, state: FlowState, ctx: Context): Promise<void> {
     this.flows.delete(userId);
 
-    let expense: ParsedExpenseDto;
+    const date = state.date ?? this.today();
+    const type: 'gasto' | 'ingreso' =
+      state.tab === 'historial'
+        ? state.debtDirection === 'me_debe' ? 'ingreso' : 'gasto'
+        : state.type === 'ingreso' ? 'ingreso' : 'gasto';
 
-    if (state.parsedExpense) {
-      expense = state.parsedExpense;
-    } else {
-      const date = state.date ?? this.today();
-      const type: 'gasto' | 'ingreso' =
-        state.tab === 'historial'
-          ? state.debtDirection === 'me_debe' ? 'ingreso' : 'gasto'
-          : state.type === 'ingreso' ? 'ingreso' : 'gasto';
-
-      expense = {
-        tab: state.tab!,
-        type,
-        amount: state.amount!,
-        description: state.concept!,
-        date,
-        person: state.person,
-        debtDirection: state.debtDirection,
-        status: state.status,
-      };
-    }
+    const expense: ParsedExpenseDto = {
+      tab: state.tab!,
+      type,
+      amount: state.amount!,
+      description: state.concept!,
+      date,
+      person: state.person,
+      debtDirection: state.debtDirection,
+      status: state.status,
+    };
 
     try {
       const newTotal = await this.sheetsService.appendExpense(expense);
