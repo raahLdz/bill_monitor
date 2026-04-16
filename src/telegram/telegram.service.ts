@@ -4,6 +4,7 @@ import { SheetsService, PendingDebt } from '../sheets/sheets.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
+  | 'action'
   | 'main'
   | 'dep_date'
   | 'dep_type'
@@ -20,7 +21,7 @@ type FlowStep =
   | 'gp_amount';
 
 // Steps that require a button tap — text input is ignored
-const BUTTON_STEPS: FlowStep[] = ['main', 'dep_type', 'hist_who', 'hist_status'];
+const BUTTON_STEPS: FlowStep[] = ['action', 'main', 'dep_type', 'hist_who', 'hist_status'];
 
 interface FlowState {
   step: FlowStep;
@@ -155,6 +156,16 @@ export class TelegramService {
     if (!state) return;
 
     switch (key) {
+      case 'action':
+        if (value === 'registro') {
+          state.step = 'main';
+          await this.askTabs(ctx);
+        } else {
+          this.flows.delete(userId);
+          await this.showPendingDebts(ctx);
+        }
+        break;
+
       case 'tab':
         state.tab = value as FlowState['tab'];
         if (value === 'departamento') {
@@ -295,9 +306,19 @@ export class TelegramService {
   // ── Prompts ────────────────────────────────────────────────────────────────
 
   private async askMain(userId: number, ctx: Context): Promise<void> {
-    this.flows.set(userId, { step: 'main' });
+    this.flows.set(userId, { step: 'action' });
     await ctx.reply(
-      '¿Qué quieres registrar?',
+      '¿Qué quieres hacer?',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ Anotar un movimiento', 'flow:action:registro')],
+        [Markup.button.callback('✏️ Actualizar un registro', 'flow:action:actualizar')],
+      ]),
+    );
+  }
+
+  private async askTabs(ctx: Context): Promise<void> {
+    await ctx.reply(
+      '¿En qué pestaña lo anotamos?',
       Markup.inlineKeyboard([
         [
           Markup.button.callback('🏠 Departamento', 'flow:tab:departamento'),
