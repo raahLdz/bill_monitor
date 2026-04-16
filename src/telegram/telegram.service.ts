@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
-import { SheetsService, PendingDebt } from '../sheets/sheets.service';
+import { SheetsService, PendingDebt, PersonDebtSummary } from '../sheets/sheets.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
@@ -305,6 +305,48 @@ export class TelegramService {
       '💳 Selecciona la deuda a marcar como pagada:',
       Markup.inlineKeyboard(buttons),
     );
+  }
+
+  async showPersonDebts(personName: string, ctx: Context): Promise<void> {
+    if (!personName) {
+      await ctx.reply('Escribe el nombre después del comando, por ejemplo:\n/deuda Ricardo');
+      return;
+    }
+
+    const summary = await this.sheetsService.getPersonDebts(personName);
+
+    if (!summary) {
+      await ctx.reply(`No encontré deudas pendientes con *${personName}*.`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+    const { matchedName, meDeben, leDebo, totalMeDeben, totalLeDebo } = summary;
+
+    let msg = `👤 *Deudas pendientes con ${matchedName}*\n\n`;
+
+    if (meDeben.length > 0) {
+      msg += `🤝 *Te debe:*\n`;
+      for (const d of meDeben) msg += `  • ${d.concept} — ${fmt(d.amount)}\n`;
+      msg += `  Total: *${fmt(totalMeDeben)}*\n\n`;
+    }
+
+    if (leDebo.length > 0) {
+      msg += `💸 *Le debes:*\n`;
+      for (const d of leDebo) msg += `  • ${d.concept} — ${fmt(d.amount)}\n`;
+      msg += `  Total: *${fmt(totalLeDebo)}*\n\n`;
+    }
+
+    const net = totalMeDeben - totalLeDebo;
+    if (meDeben.length > 0 && leDebo.length > 0) {
+      msg += net > 0
+        ? `📊 *Saldo neto: ${matchedName} te debe ${fmt(net)}*`
+        : net < 0
+          ? `📊 *Saldo neto: Le debes a ${matchedName} ${fmt(Math.abs(net))}*`
+          : `📊 *Saldo neto: Están a mano*`;
+    }
+
+    await ctx.reply(msg.trim(), { parse_mode: 'Markdown' });
   }
 
   // ── Prompts ────────────────────────────────────────────────────────────────

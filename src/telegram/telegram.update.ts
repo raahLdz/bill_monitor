@@ -35,6 +35,7 @@ export class TelegramUpdate {
         '💳 *Gastos personales* — tus gastos del día a día\n\n' +
         '⚡ *Comandos:*\n' +
         '/resumen — ver saldo y deudas pendientes\n' +
+        '/deuda Ricardo — balance pendiente con una persona\n' +
         '/pagar — marcar una deuda como pagada\n' +
         '/cancelar — cancelar el registro en curso',
       { parse_mode: 'Markdown' },
@@ -69,6 +70,20 @@ export class TelegramUpdate {
     } catch (error) {
       this.logger.error('Error al mostrar deudas pendientes', error);
       await ctx.reply('⚠️ No pude obtener las deudas. Intenta de nuevo.');
+    }
+  }
+
+  @Command('deuda')
+  async onDeuda(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    try {
+      await ctx.sendChatAction('typing');
+      const text = (ctx.message as { text?: string })?.text ?? '';
+      const personName = text.split(' ').slice(1).join(' ').trim();
+      await this.telegramService.showPersonDebts(personName, ctx);
+    } catch (error) {
+      this.logger.error('Error al buscar deudas por persona', error);
+      await ctx.reply('⚠️ No pude buscar las deudas. Intenta de nuevo.');
     }
   }
 

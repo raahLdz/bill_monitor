@@ -25,6 +25,14 @@ export interface PendingDebt {
   isMeDebe: boolean;
 }
 
+export interface PersonDebtSummary {
+  matchedName: string;
+  meDeben: { concept: string; amount: number }[];
+  leDebo: { concept: string; amount: number }[];
+  totalMeDeben: number;
+  totalLeDebo: number;
+}
+
 const TAB_CONFIGS: Record<'departamento' | 'historial' | 'gastos_personales', TabConfig> = {
   departamento: {
     name: 'Departamento',
@@ -450,6 +458,51 @@ export class SheetsService {
       return pending;
     } catch {
       return [];
+    }
+  }
+
+  async getPersonDebts(personName: string): Promise<PersonDebtSummary | null> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Historial!A:F',
+      });
+
+      const values = response.data.values ?? [];
+      const query = personName.toLowerCase();
+
+      const meDeben: { concept: string; amount: number }[] = [];
+      const leDebo: { concept: string; amount: number }[] = [];
+      let matchedName = personName;
+
+      for (let i = 1; i < values.length; i++) {
+        const row = values[i];
+        const rowPerson = String(row[1] ?? '');
+        if (!rowPerson.toLowerCase().includes(query)) continue;
+        if ((row[5] ?? '').toString().trim() !== 'Pendiente') continue;
+
+        matchedName = rowPerson; // use the actual name from the sheet
+        const ingreso = parseFloat(String(row[3] ?? '0').replace(/[$,\s]/g, '')) || 0;
+        const egreso = parseFloat(String(row[4] ?? '0').replace(/[$,\s]/g, '')) || 0;
+
+        if (ingreso > 0) {
+          meDeben.push({ concept: String(row[2] ?? ''), amount: ingreso });
+        } else if (egreso > 0) {
+          leDebo.push({ concept: String(row[2] ?? ''), amount: egreso });
+        }
+      }
+
+      if (meDeben.length === 0 && leDebo.length === 0) return null;
+
+      const totalMeDeben = meDeben.reduce((s, d) => s + d.amount, 0);
+      const totalLeDebo = leDebo.reduce((s, d) => s + d.amount, 0);
+
+      return { matchedName, meDeben, leDebo, totalMeDeben, totalLeDebo };
+    } catch {
+      return null;
     }
   }
 
