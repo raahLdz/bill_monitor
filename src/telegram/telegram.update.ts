@@ -42,6 +42,27 @@ export class TelegramUpdate {
     );
   }
 
+  @Command('help')
+  async onHelp(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    await ctx.reply(
+      '🤖 *Bill Monitor* — tu asistente de finanzas personales\n\n' +
+        'Registra gastos, ingresos y deudas directamente en Google Sheets desde Telegram.\n\n' +
+        '📂 *Pestañas disponibles:*\n' +
+        '🏠 *Departamento* — renta, luz, agua, gas y otros gastos compartidos\n' +
+        '📖 *Historial* — préstamos y deudas con personas\n' +
+        '💳 *Gastos personales* — tus gastos del día a día\n\n' +
+        '⚡ *Comandos:*\n' +
+        '/resumen — saldo del departamento y deudas pendientes\n' +
+        '/deuda \\<nombre\\> — balance pendiente con una persona\n' +
+        '/pagar — marcar una deuda como pagada\n' +
+        '/cancelar — cancelar el registro en curso\n' +
+        '/help — mostrar este mensaje\n\n' +
+        '💡 Mándame cualquier mensaje para iniciar un registro.',
+      { parse_mode: 'Markdown' },
+    );
+  }
+
   @Command('cancelar')
   async onCancelar(@Ctx() ctx: Context): Promise<void> {
     if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
