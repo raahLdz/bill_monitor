@@ -85,9 +85,11 @@ export class SheetsService {
     const raw = this.configService
       .get<string>('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', '');
 
-    return new google.auth.JWT({
-      email: this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
-      key: this.buildPrivateKey(raw),
+    return new google.auth.GoogleAuth({
+      credentials: {
+        client_email: this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
+        private_key: this.buildPrivateKey(raw),
+      },
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
   }
