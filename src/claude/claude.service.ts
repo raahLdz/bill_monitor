@@ -24,26 +24,33 @@ export class ClaudeService {
     try {
       const response = await this.client.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 256,
+        max_tokens: 512,
         system: [
           {
             type: 'text',
-            text: `Eres un asistente de finanzas personales. Analiza mensajes en español mexicano y extrae información de gastos o ingresos.
+            text: `Eres un asistente de finanzas personales. Analiza mensajes en español mexicano y extrae información de gastos, ingresos o deudas.
 
 Devuelve un objeto JSON con estos campos:
-- type: "gasto" o "ingreso"
+- tab: "departamento" | "historial" | "gastos_personales"
+- type: "gasto" | "ingreso"
 - amount: número (solo el valor numérico, sin símbolos ni comas)
-- category: una de estas: "Transporte", "Comida", "Servicios", "Salud", "Entretenimiento", "Educación", "Ingresos", "Otros"
-- description: descripción breve del gasto o ingreso
-- date: la fecha de hoy en formato DD/MM/YYYY
+- description: descripción breve
+- date: fecha en formato DD/MM/YYYY
+- person: nombre de la persona (solo si tab es "historial")
+- debtDirection: "me_debe" | "le_debo" (solo si tab es "historial")
+- status: "Pagada" | "Pendiente" (solo si tab es "historial"; por defecto "Pendiente")
 
-Si el mensaje NO es una transacción financiera, devuelve exactamente: null
+Reglas para elegir tab:
+- "departamento": gastos o ingresos del departamento compartido (renta, luz, agua, gas, internet del depa, cuotas del edificio, etc.)
+- "historial": préstamos o deudas entre personas (me prestó, le presté, me debe, le debo, deuda, etc.)
+- "gastos_personales": gastos del día a día (comida, transporte, ropa, entretenimiento, salud personal, etc.)
 
-Reglas:
+Reglas adicionales:
 - Solo devuelve JSON válido, sin explicaciones ni bloques de código
-- Ingresos: depósitos, pagos recibidos, sueldo → type: "ingreso", category: "Ingresos"
-- Gastos: compras, pagos → type: "gasto"
-- Categorías por contexto: gasolina→Transporte, oxxo/tienda/super/comida→Comida, luz/agua/teléfono/internet→Servicios, doctor/farmacia→Salud, cine/spotify/netflix→Entretenimiento, escuela/colegiatura/libros→Educación`,
+- Si no hay fecha en el mensaje, usa la fecha de hoy
+- Para historial: si te deben (me prestaron, me deben, me pagará) → debtDirection: "me_debe", type: "ingreso"
+- Para historial: si debes tú (le presté, yo le debo, le pagué) → debtDirection: "le_debo", type: "gasto"
+- Si el mensaje NO contiene información suficiente para ser una transacción financiera, devuelve exactamente: null`,
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -61,7 +68,13 @@ Reglas:
       const text = block.text.trim();
       if (text === 'null') return null;
 
-      return JSON.parse(text) as ParsedExpenseDto;
+      const parsed = JSON.parse(text) as ParsedExpenseDto;
+
+      // Validate required fields are present
+      if (!parsed.tab || !parsed.amount || !parsed.description) return null;
+      if (parsed.tab === 'historial' && (!parsed.person || !parsed.debtDirection)) return null;
+
+      return parsed;
     } catch (error) {
       this.logger.error('Error al parsear mensaje con Claude', error);
       return null;

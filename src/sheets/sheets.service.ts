@@ -57,14 +57,37 @@ export class SheetsService {
 
   // ── Auth ───────────────────────────────────────────────────────────────────
 
+  private buildPrivateKey(raw: string): string {
+    // Normalize literal \n to real newlines
+    const normalized = raw.replace(/\\n/g, '\n').trim();
+
+    const BEGIN = '-----BEGIN PRIVATE KEY-----';
+    const END = '-----END PRIVATE KEY-----';
+
+    const beginIdx = normalized.indexOf(BEGIN);
+    const endIdx = normalized.indexOf(END);
+
+    if (beginIdx === -1 || endIdx === -1) {
+      this.logger.warn('La private key no tiene marcadores PEM válidos');
+      return normalized;
+    }
+
+    // Extract base64 content, strip ALL whitespace, then re-chunk at 64 chars
+    const base64 = normalized
+      .substring(beginIdx + BEGIN.length, endIdx)
+      .replace(/\s+/g, '');
+
+    const lines = base64.match(/.{1,64}/g) ?? [];
+    return `${BEGIN}\n${lines.join('\n')}\n${END}\n`;
+  }
+
   private getAuth() {
-    const privateKey = this.configService
-      .get<string>('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', '')
-      .replace(/\\n/g, '\n');
+    const raw = this.configService
+      .get<string>('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', '');
 
     return new google.auth.JWT({
       email: this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
-      key: privateKey,
+      key: this.buildPrivateKey(raw),
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
   }
