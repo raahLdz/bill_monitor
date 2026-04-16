@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
 import { SheetsService, PendingDebt, PersonDebtSummary, RecurringExpense, SplitEvent, SplitExpense } from '../sheets/sheets.service';
+import { UserService } from './user.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
@@ -30,12 +31,23 @@ type FlowStep =
   | 'split_add_concept'
   | 'split_add_amount'
   | 'split_wait_calc'
-  | 'split_wait_close';
+  | 'split_wait_close'
+  | 'admin_add_id'
+  | 'admin_add_name';
 
 // Steps that require a button tap — text input is ignored
 const BUTTON_STEPS: FlowStep[] = [
   'action', 'main', 'dep_type', 'hist_who', 'hist_status',
   'split_wait_add', 'split_wait_who', 'split_wait_calc', 'split_wait_close',
+];
+
+// Steps that non-admin users are allowed to be in
+const NON_ADMIN_STEPS: FlowStep[] = [
+  'action',
+  'split_create_name', 'split_create_members',
+  'split_wait_add', 'split_wait_who',
+  'split_add_concept', 'split_add_amount',
+  'split_wait_calc', 'split_wait_close',
 ];
 
 interface FlowState {
@@ -54,6 +66,7 @@ interface FlowState {
   splitEventName?: string;
   splitParticipants?: string[];
   splitWho?: string;
+  adminAddId?: number;
 }
 
 @Injectable()
@@ -61,15 +74,25 @@ export class TelegramService {
   private readonly logger = new Logger(TelegramService.name);
   private readonly flows = new Map<number, FlowState>();
 
-  constructor(private readonly sheetsService: SheetsService) {}
+  constructor(
+    private readonly sheetsService: SheetsService,
+    private readonly userService: UserService,
+  ) {}
 
   // ── Public entry points ────────────────────────────────────────────────────
 
-  async handleText(userId: number, text: string, ctx: Context): Promise<void> {
+  async handleText(userId: number, text: string, ctx: Context, isAdmin = true): Promise<void> {
     const state = this.flows.get(userId);
 
     if (!state) {
-      await this.askMain(userId, ctx);
+      await this.askMain(userId, ctx, isAdmin);
+      return;
+    }
+
+    // Non-admin users can only be in split-related steps
+    if (!isAdmin && !NON_ADMIN_STEPS.includes(state.step)) {
+      this.flows.delete(userId);
+      await this.askMain(userId, ctx, false);
       return;
     }
 
@@ -98,7 +121,7 @@ export class TelegramService {
         const n = this.parseAmount(t);
         if (!n) { await this.badAmount(ctx); return; }
         state.amount = n;
-        await this.save(userId, state, ctx);
+        await this.save(userId, state, ctx, isAdmin);
         break;
       }
 
@@ -147,7 +170,7 @@ export class TelegramService {
         const n = this.parseAmount(t);
         if (!n) { await this.badAmount(ctx); return; }
         state.amount = n;
-        await this.save(userId, state, ctx);
+        await this.save(userId, state, ctx, isAdmin);
         break;
       }
 
@@ -211,7 +234,6 @@ export class TelegramService {
           `✅ *Evento creado*\n\n📌 ${state.splitEventName}\n👥 ${participants.join(', ')}\n\nYa puedes agregar gastos desde el menú "🍕 Dividir gastos".`,
           { parse_mode: 'Markdown' },
         );
-        // Show quick actions
         await ctx.reply(
           '¿Quieres agregar el primer gasto ahora?',
           Markup.inlineKeyboard([
@@ -254,15 +276,48 @@ export class TelegramService {
         );
         break;
       }
+
+      // ── Admin ──────────────────────────────────────────────────────
+      case 'admin_add_id': {
+        const id = parseInt(t);
+        if (isNaN(id) || id <= 0) {
+          await ctx.reply('⚠️ Ese no parece un ID válido. Escribe solo el número.\n\n💡 El usuario puede obtener su ID enviando /start a @userinfobot');
+          return;
+        }
+        state.adminAddId = id;
+        state.step = 'admin_add_name';
+        await ctx.reply('👤 ¿Cuál es el nombre de este usuario?');
+        break;
+      }
+
+      case 'admin_add_name': {
+        if (t.length < 2) {
+          await ctx.reply('⚠️ El nombre es muy corto. Intenta de nuevo.');
+          return;
+        }
+        try {
+          await this.userService.addUser(state.adminAddId!, t);
+          this.flows.delete(userId);
+          await ctx.reply(
+            `✅ Usuario *${t}* (ID: \`${state.adminAddId}\`) agregado exitosamente.\n\nYa puede usar el bot para dividir gastos.`,
+            { parse_mode: 'Markdown' },
+          );
+        } catch (error) {
+          this.logger.error('Error al agregar usuario', error);
+          await ctx.reply('⚠️ No pude agregar el usuario. Intenta de nuevo.');
+        }
+        break;
+      }
     }
   }
 
-  async handleAction(userId: number, data: string, ctx: Context): Promise<void> {
+  async handleAction(userId: number, data: string, ctx: Context, isAdmin = true): Promise<void> {
     // data format: "flow:<key>:<value>"
     const [, key, value] = data.split(':');
 
     // These actions do not require an active flow
     if (key === 'mark_paid') {
+      if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
       if (value === 'cancel') {
         await ctx.reply('Cancelado.');
         return;
@@ -279,15 +334,18 @@ export class TelegramService {
 
     if (key === 'action') {
       if (value === 'registro') {
+        if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
         this.flows.set(userId, { step: 'main' });
         await this.askTabs(ctx);
       } else if (value === 'gastos_fijos') {
+        if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
         this.flows.set(userId, { step: 'gf_concept' });
         await ctx.reply('📝 ¿Cuál es el nombre del gasto fijo? (ej: Netflix, Gym, Renta)');
       } else if (value === 'dividir') {
         this.flows.set(userId, { step: 'action' });
         await this.askSplitMenu(ctx);
       } else {
+        if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
         this.flows.delete(userId);
         await this.showPendingDebts(ctx);
       }
@@ -295,6 +353,7 @@ export class TelegramService {
     }
 
     if (key === 'register_fixed') {
+      if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
       const rowIndex = parseInt(value);
       try {
         const expenses = await this.sheetsService.getRecurringExpenses();
@@ -387,6 +446,7 @@ export class TelegramService {
 
     if (key === 'split_saveall') {
       const eventId = parseInt(value);
+      if (!isAdmin) { await ctx.reply('⚠️ Solo el administrador puede guardar en Historial.'); return; }
       await this.saveSplitToHistorial(eventId, ctx);
       return;
     }
@@ -405,7 +465,7 @@ export class TelegramService {
 
     if (key === 'again') {
       if (value === 'yes') {
-        await this.askMain(userId, ctx);
+        await this.askMain(userId, ctx, isAdmin);
       } else {
         await ctx.reply('👋 ¡Listo! Cuando quieras registrar algo más, mándame un mensaje.');
       }
@@ -413,6 +473,7 @@ export class TelegramService {
     }
 
     if (key === 'undo') {
+      if (!isAdmin) { await ctx.reply('⚠️ No tienes acceso a esa función.'); return; }
       const parts = data.split(':');
       const tab = parts[2] as 'departamento' | 'historial' | 'gastos_personales';
       const rowIndex = parseInt(parts[3]);
@@ -422,6 +483,32 @@ export class TelegramService {
       } catch (error) {
         this.logger.error('Error al deshacer registro', error);
         await ctx.reply('⚠️ No pude eliminar el registro. Intenta de nuevo.');
+      }
+      return;
+    }
+
+    // ── Admin actions ──────────────────────────────────────────────────────────
+    if (key === 'admin_add') {
+      this.flows.set(userId, { step: 'admin_add_id' });
+      await ctx.reply(
+        '📲 Envía el ID de Telegram del nuevo usuario.\n\n💡 El usuario puede obtener su ID enviando /start a @userinfobot',
+      );
+      return;
+    }
+
+    if (key === 'admin_toggle') {
+      const targetId = parseInt(value);
+      const users = this.userService.listUsers();
+      const user = users.find((u) => u.telegramId === targetId);
+      if (!user) { await ctx.reply('⚠️ Usuario no encontrado.'); return; }
+      try {
+        await this.userService.setUserActive(targetId, !user.active);
+        const newStatus = !user.active;
+        await ctx.reply(`✅ *${user.name}* ${newStatus ? 'activado ✅' : 'desactivado ❌'}`, { parse_mode: 'Markdown' });
+        await this.showAdminPanel(ctx);
+      } catch (error) {
+        this.logger.error('Error al cambiar estado de usuario', error);
+        await ctx.reply('⚠️ No pude cambiar el estado. Intenta de nuevo.');
       }
       return;
     }
@@ -477,7 +564,7 @@ export class TelegramService {
 
       case 'hist_status':
         state.status = value === 'pagada' ? 'Pagada' : 'Pendiente';
-        await this.save(userId, state, ctx);
+        await this.save(userId, state, ctx, isAdmin);
         break;
 
     }
@@ -567,7 +654,6 @@ export class TelegramService {
     let year = now.getFullYear();
 
     if (input) {
-      // Accept "03", "3", "03/2025", "3/2025"
       const parts = input.split('/');
       const parsedMonth = parseInt(parts[0]);
       if (!isNaN(parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12) {
@@ -646,6 +732,38 @@ export class TelegramService {
     await ctx.reply(msg.trim(), { parse_mode: 'Markdown' });
   }
 
+  async showAdminPanel(ctx: Context): Promise<void> {
+    const users = this.userService.listUsers();
+
+    let msg = '👥 *Panel de administración*\n\n';
+    if (users.length === 0) {
+      msg += 'No hay usuarios registrados aún.\n';
+    } else {
+      msg += `*Usuarios registrados (${users.length}):*\n`;
+      for (const u of users) {
+        msg += `• ${u.name} — ${u.active ? '✅ Activo' : '❌ Inactivo'}\n`;
+      }
+    }
+
+    const toggleButtons = users.map((u) => [
+      Markup.button.callback(
+        `${u.active ? '🔴 Desactivar' : '🟢 Activar'} ${u.name}`,
+        `flow:admin_toggle:${u.telegramId}`,
+      ),
+    ]);
+
+    await ctx.reply(
+      msg,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          ...toggleButtons,
+          [Markup.button.callback('➕ Agregar usuario', 'flow:admin_add:start')],
+        ]),
+      },
+    );
+  }
+
   // ── Split helpers ──────────────────────────────────────────────────────────
 
   private async askSplitMenu(ctx: Context): Promise<void> {
@@ -714,7 +832,6 @@ export class TelegramService {
     msg += `👥 ${event.participants.join(', ')}\n`;
     msg += `💵 Total: ${fmt(total)} | Parte de cada quien: ${fmt(share)}\n\n`;
 
-    // Show what each person paid
     const paid: Record<string, number> = {};
     for (const e of expenses) paid[e.paidBy] = (paid[e.paidBy] ?? 0) + e.amount;
     msg += `*Lo que pagó cada quien:*\n`;
@@ -816,17 +933,26 @@ export class TelegramService {
 
   // ── Prompts ────────────────────────────────────────────────────────────────
 
-  private async askMain(userId: number, ctx: Context): Promise<void> {
+  private async askMain(userId: number, ctx: Context, isAdmin = true): Promise<void> {
     this.flows.set(userId, { step: 'action' });
-    await ctx.reply(
-      '¿Qué quieres hacer?',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('➕ Anotar un movimiento', 'flow:action:registro')],
-        [Markup.button.callback('✏️ Actualizar un registro', 'flow:action:actualizar')],
-        [Markup.button.callback('⏰ Agregar gasto fijo', 'flow:action:gastos_fijos')],
-        [Markup.button.callback('🍕 Dividir gastos', 'flow:action:dividir')],
-      ]),
-    );
+    if (isAdmin) {
+      await ctx.reply(
+        '¿Qué quieres hacer?',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('➕ Anotar un movimiento', 'flow:action:registro')],
+          [Markup.button.callback('✏️ Actualizar un registro', 'flow:action:actualizar')],
+          [Markup.button.callback('⏰ Agregar gasto fijo', 'flow:action:gastos_fijos')],
+          [Markup.button.callback('🍕 Dividir gastos', 'flow:action:dividir')],
+        ]),
+      );
+    } else {
+      await ctx.reply(
+        '¿Qué quieres hacer?',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🍕 Dividir gastos', 'flow:action:dividir')],
+        ]),
+      );
+    }
   }
 
   private async askTabs(ctx: Context): Promise<void> {
@@ -934,7 +1060,7 @@ export class TelegramService {
     }
   }
 
-  private async save(userId: number, state: FlowState, ctx: Context): Promise<void> {
+  private async save(userId: number, state: FlowState, ctx: Context, isAdmin = true): Promise<void> {
     this.flows.delete(userId);
 
     const date = state.date ?? this.today();
@@ -969,10 +1095,14 @@ export class TelegramService {
       return;
     }
 
+    const undoButton = isAdmin
+      ? [[Markup.button.callback('↩️ Deshacer', `flow:undo:${expense.tab}:${rowIndex}`)]]
+      : [];
+
     await ctx.reply(
       '¿Qué hacemos?',
       Markup.inlineKeyboard([
-        [Markup.button.callback('↩️ Deshacer', `flow:undo:${expense.tab}:${rowIndex}`)],
+        ...undoButton,
         [
           Markup.button.callback('➕ Agregar otro', 'flow:again:yes'),
           Markup.button.callback('✅ Terminar', 'flow:again:no'),

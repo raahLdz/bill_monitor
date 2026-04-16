@@ -25,6 +25,13 @@ export interface PendingDebt {
   isMeDebe: boolean;
 }
 
+export interface UserRecord {
+  telegramId: number;
+  name: string;
+  active: boolean;
+  rowIndex: number;
+}
+
 export interface SplitEvent {
   rowIndex: number;
   name: string;
@@ -913,5 +920,105 @@ export class SheetsService {
     } catch {
       return [];
     }
+  }
+
+  // ── Usuarios ───────────────────────────────────────────────────────────────
+
+  private readonly USUARIOS_TAB = 'Usuarios';
+
+  private async ensureUsuariosTab(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
+    const { sheetId, isNew } = await this.ensureSheetExists(sheets, spreadsheetId, this.USUARIOS_TAB);
+    if (!isNew) return;
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+              fields: 'gridProperties.frozenRowCount',
+            },
+          },
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 0.18, green: 0.18, blue: 0.18 },
+                  textFormat: {
+                    bold: true,
+                    fontSize: 11,
+                    foregroundColor: { red: 1, green: 1, blue: 1 },
+                  },
+                  horizontalAlignment: 'CENTER',
+                  verticalAlignment: 'MIDDLE',
+                },
+              },
+              fields:
+                'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+            },
+          },
+        ],
+      },
+    });
+
+    await this.writeHeaders(sheets, spreadsheetId, this.USUARIOS_TAB, [
+      'TelegramID',
+      'Nombre',
+      'Activo',
+    ]);
+  }
+
+  async getUsers(): Promise<UserRecord[]> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      await this.ensureUsuariosTab(sheets, spreadsheetId);
+
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${this.USUARIOS_TAB}!A:C`,
+      });
+
+      return (res.data.values ?? [])
+        .slice(1)
+        .map((row, i) => ({
+          telegramId: parseInt(String(row[0] ?? '0')),
+          name: String(row[1] ?? ''),
+          active: String(row[2] ?? 'true').toLowerCase() !== 'false',
+          rowIndex: i + 2,
+        }))
+        .filter((u) => u.telegramId > 0 && u.name);
+    } catch {
+      return [];
+    }
+  }
+
+  async addUser(telegramId: number, name: string): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await this.ensureUsuariosTab(sheets, spreadsheetId);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${this.USUARIOS_TAB}!A:C`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[telegramId, name, 'true']] },
+    });
+  }
+
+  async setUserActive(rowIndex: number, active: boolean): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${this.USUARIOS_TAB}!C${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[active ? 'true' : 'false']] },
+    });
   }
 }

@@ -5,6 +5,7 @@ import { SheetsModule } from '../sheets/sheets.module';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.update';
 import { SchedulerService } from './scheduler.service';
+import { UserService } from './user.service';
 
 @Module({
   imports: [
@@ -17,6 +18,6 @@ import { SchedulerService } from './scheduler.service';
     }),
     SheetsModule,
   ],
-  providers: [TelegramService, TelegramUpdate, SchedulerService],
+  providers: [UserService, TelegramService, TelegramUpdate, SchedulerService],
 })
 export class TelegramModule {}
