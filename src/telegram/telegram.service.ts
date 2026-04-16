@@ -163,6 +163,15 @@ export class TelegramService {
       return;
     }
 
+    if (key === 'again') {
+      if (value === 'yes') {
+        await this.askMain(userId, ctx);
+      } else {
+        await ctx.reply('👋 ¡Listo! Cuando quieras registrar algo más, mándame un mensaje.');
+      }
+      return;
+    }
+
     const state = this.flows.get(userId);
     if (!state) return;
 
@@ -217,13 +226,6 @@ export class TelegramService {
         await this.save(userId, state, ctx);
         break;
 
-      case 'again':
-        if (value === 'yes') {
-          await this.askMain(userId, ctx);
-        } else {
-          await ctx.reply('👋 ¡Listo! Cuando quieras registrar algo más, mándame un mensaje.');
-        }
-        break;
     }
   }
 
