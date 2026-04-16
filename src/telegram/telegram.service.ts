@@ -187,6 +187,14 @@ export class TelegramService {
         state.status = value === 'pagada' ? 'Pagada' : 'Pendiente';
         await this.save(userId, state, ctx);
         break;
+
+      case 'again':
+        if (value === 'yes') {
+          await this.askMain(userId, ctx);
+        } else {
+          await ctx.reply('👋 ¡Listo! Cuando quieras registrar algo más, mándame un mensaje.');
+        }
+        break;
     }
   }
 
@@ -300,7 +308,18 @@ export class TelegramService {
       await ctx.reply(
         '⚠️ No pude guardar en el sheet. Verifica las credenciales de Google.',
       );
+      return;
     }
+
+    await ctx.reply(
+      '¿Quieres agregar otro registro?',
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback('➕ Sí, otro', 'flow:again:yes'),
+          Markup.button.callback('✅ No, ya terminé', 'flow:again:no'),
+        ],
+      ]),
+    );
   }
 
   private confirm(expense: ParsedExpenseDto, total: number | null): string {
