@@ -561,7 +561,9 @@ export class SheetsService {
       });
 
       const values = response.data.values ?? [];
-      const query = personName.toLowerCase();
+      const normalize = (s: string) =>
+        s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const query = normalize(personName);
 
       const meDeben: { concept: string; amount: number }[] = [];
       const leDebo: { concept: string; amount: number }[] = [];
@@ -570,7 +572,7 @@ export class SheetsService {
       for (let i = 1; i < values.length; i++) {
         const row = values[i];
         const rowPerson = String(row[1] ?? '');
-        if (!rowPerson.toLowerCase().includes(query)) continue;
+        if (!normalize(rowPerson).includes(query)) continue;
         if ((row[5] ?? '').toString().trim() !== 'Pendiente') continue;
 
         matchedName = rowPerson; // use the actual name from the sheet
