@@ -136,7 +136,7 @@ export class TelegramService {
     // data format: "flow:<key>:<value>"
     const [, key, value] = data.split(':');
 
-    // mark_paid does not require an active flow
+    // These actions do not require an active flow
     if (key === 'mark_paid') {
       if (value === 'cancel') {
         await ctx.reply('Cancelado.');
@@ -152,19 +152,21 @@ export class TelegramService {
       return;
     }
 
+    if (key === 'action') {
+      if (value === 'registro') {
+        this.flows.set(userId, { step: 'main' });
+        await this.askTabs(ctx);
+      } else {
+        this.flows.delete(userId);
+        await this.showPendingDebts(ctx);
+      }
+      return;
+    }
+
     const state = this.flows.get(userId);
     if (!state) return;
 
     switch (key) {
-      case 'action':
-        if (value === 'registro') {
-          state.step = 'main';
-          await this.askTabs(ctx);
-        } else {
-          this.flows.delete(userId);
-          await this.showPendingDebts(ctx);
-        }
-        break;
 
       case 'tab':
         state.tab = value as FlowState['tab'];
