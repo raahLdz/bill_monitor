@@ -17,6 +17,14 @@ interface TabConfig {
   columnWidths: number[];
 }
 
+export interface PendingDebt {
+  rowIndex: number; // 1-based sheet row number
+  person: string;
+  concept: string;
+  amount: number;
+  isMeDebe: boolean;
+}
+
 const TAB_CONFIGS: Record<'departamento' | 'historial' | 'gastos_personales', TabConfig> = {
   departamento: {
     name: 'Departamento',
@@ -361,5 +369,74 @@ export class SheetsService {
     }
 
     return this.buildAndAppend(sheets, spreadsheetId, config, expense, lastTotal);
+  }
+
+  async getDepartamentoSaldo(): Promise<number | null> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Departamento!E:E',
+      });
+
+      const values = response.data.values ?? [];
+      const dataRows = values.slice(1).filter((r) => r[0] != null && r[0] !== '');
+      if (dataRows.length === 0) return null;
+
+      const last = dataRows[dataRows.length - 1][0];
+      return parseFloat(String(last).replace(/[$,\s]/g, '')) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async getPendingDebts(): Promise<PendingDebt[]> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Historial!A:F',
+      });
+
+      const values = response.data.values ?? [];
+      const pending: PendingDebt[] = [];
+
+      for (let i = 1; i < values.length; i++) {
+        const row = values[i];
+        if ((row[5] ?? '').toString().trim() !== 'Pendiente') continue;
+
+        const ingreso = parseFloat(String(row[3] ?? '0').replace(/[$,\s]/g, '')) || 0;
+        const egreso = parseFloat(String(row[4] ?? '0').replace(/[$,\s]/g, '')) || 0;
+        const isMeDebe = ingreso > 0;
+
+        pending.push({
+          rowIndex: i + 1, // sheet row (1-based; row 1 is header)
+          person: String(row[1] ?? ''),
+          concept: String(row[2] ?? ''),
+          amount: isMeDebe ? ingreso : egreso,
+          isMeDebe,
+        });
+      }
+
+      return pending;
+    } catch {
+      return [];
+    }
+  }
+
+  async markDebtAsPaid(rowIndex: number): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `Historial!F${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Pagada']] },
+    });
   }
 }

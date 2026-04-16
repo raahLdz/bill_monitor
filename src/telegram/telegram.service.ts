@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
-import { SheetsService } from '../sheets/sheets.service';
+import { SheetsService, PendingDebt } from '../sheets/sheets.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
@@ -132,11 +132,27 @@ export class TelegramService {
   }
 
   async handleAction(userId: number, data: string, ctx: Context): Promise<void> {
-    const state = this.flows.get(userId);
-    if (!state) return;
-
     // data format: "flow:<key>:<value>"
     const [, key, value] = data.split(':');
+
+    // mark_paid does not require an active flow
+    if (key === 'mark_paid') {
+      if (value === 'cancel') {
+        await ctx.reply('Cancelado.');
+        return;
+      }
+      try {
+        await this.sheetsService.markDebtAsPaid(parseInt(value));
+        await ctx.reply('✅ Deuda marcada como pagada.');
+      } catch (error) {
+        this.logger.error('Error al marcar deuda como pagada', error);
+        await ctx.reply('⚠️ No pude actualizar el registro. Intenta de nuevo.');
+      }
+      return;
+    }
+
+    const state = this.flows.get(userId);
+    if (!state) return;
 
     switch (key) {
       case 'tab':
@@ -196,6 +212,84 @@ export class TelegramService {
         }
         break;
     }
+  }
+
+  // ── Commands ───────────────────────────────────────────────────────────────
+
+  async cancelFlow(userId: number, ctx: Context): Promise<void> {
+    if (this.flows.has(userId)) {
+      this.flows.delete(userId);
+      await ctx.reply('❌ Registro cancelado. Mándame un mensaje cuando quieras empezar de nuevo.');
+    } else {
+      await ctx.reply('No hay ningún registro en curso.');
+    }
+  }
+
+  async showResumen(ctx: Context): Promise<void> {
+    const [saldo, pending] = await Promise.all([
+      this.sheetsService.getDepartamentoSaldo(),
+      this.sheetsService.getPendingDebts(),
+    ]);
+
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+
+    let msg = '📊 *Resumen*\n\n';
+
+    msg += '🏠 *Departamento*\n';
+    msg += saldo === null
+      ? 'Sin registros aún.\n'
+      : `${saldo >= 0 ? '📈' : '📉'} Saldo actual: *${fmt(saldo)}*\n`;
+
+    msg += '\n📖 *Historial — Deudas pendientes*\n';
+
+    if (pending.length === 0) {
+      msg += '✅ Sin deudas pendientes.\n';
+    } else {
+      let totalMeDeben = 0;
+      let totalLeDebo = 0;
+
+      for (const d of pending) {
+        if (d.isMeDebe) {
+          msg += `🤝 ${d.person} te debe *${fmt(d.amount)}* — ${d.concept}\n`;
+          totalMeDeben += d.amount;
+        } else {
+          msg += `💸 Le debes a ${d.person} *${fmt(d.amount)}* — ${d.concept}\n`;
+          totalLeDebo += d.amount;
+        }
+      }
+
+      msg += '\n';
+      if (totalMeDeben > 0) msg += `📥 Total que te deben: *${fmt(totalMeDeben)}*\n`;
+      if (totalLeDebo > 0) msg += `📤 Total que debes: *${fmt(totalLeDebo)}*\n`;
+    }
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  }
+
+  async showPendingDebts(ctx: Context): Promise<void> {
+    const pending = await this.sheetsService.getPendingDebts();
+
+    if (pending.length === 0) {
+      await ctx.reply('✅ No hay deudas pendientes.');
+      return;
+    }
+
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+
+    const buttons = [
+      ...pending.map((d: PendingDebt) => {
+        const label = d.isMeDebe
+          ? `🤝 ${d.person} — ${fmt(d.amount)}`
+          : `💸 ${d.person} — ${fmt(d.amount)}`;
+        return [Markup.button.callback(label, `flow:mark_paid:${d.rowIndex}`)];
+      }),
+      [Markup.button.callback('❌ Cancelar', 'flow:mark_paid:cancel')],
+    ];
+
+    await ctx.reply(
+      '💳 Selecciona la deuda a marcar como pagada:',
+      Markup.inlineKeyboard(buttons),
+    );
   }
 
   // ── Prompts ────────────────────────────────────────────────────────────────
@@ -305,8 +399,10 @@ export class TelegramService {
       await ctx.reply(this.confirm(expense, newTotal), { parse_mode: 'Markdown' });
     } catch (error) {
       this.logger.error('Error al guardar en Sheets', error);
+      const detail = error instanceof Error ? error.message : String(error);
       await ctx.reply(
-        '⚠️ No pude guardar en el sheet. Verifica las credenciales de Google.',
+        `⚠️ No pude guardar en el sheet.\n\n🔍 *Error:*\n\`${detail.substring(0, 400)}\``,
+        { parse_mode: 'Markdown' },
       );
       return;
     }

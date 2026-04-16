@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { Update, Start, On, Ctx, Action } from 'nestjs-telegraf';
+import { Update, Start, On, Ctx, Action, Command } from 'nestjs-telegraf';
 import { ConfigService } from '@nestjs/config';
 import { Context } from 'telegraf';
 import { TelegramService } from './telegram.service';
@@ -28,13 +28,48 @@ export class TelegramUpdate {
 
     await ctx.reply(
       '¡Hola! Soy tu asistente de finanzas personales. 💰\n\n' +
-        'Mándame cualquier mensaje para empezar a registrar.\n\n' +
-        '📂 *Pestañas disponibles:*\n' +
+        'Mándame cualquier mensaje para registrar un movimiento.\n\n' +
+        '📂 *Pestañas:*\n' +
         '🏠 *Departamento* — renta, luz, agua, gas...\n' +
         '📖 *Historial* — deudas con familia y amigos\n' +
-        '💳 *Gastos personales* — tus gastos del día a día',
+        '💳 *Gastos personales* — tus gastos del día a día\n\n' +
+        '⚡ *Comandos:*\n' +
+        '/resumen — ver saldo y deudas pendientes\n' +
+        '/pagar — marcar una deuda como pagada\n' +
+        '/cancelar — cancelar el registro en curso',
       { parse_mode: 'Markdown' },
     );
+  }
+
+  @Command('cancelar')
+  async onCancelar(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    if (!ctx.from) return;
+    await this.telegramService.cancelFlow(ctx.from.id, ctx);
+  }
+
+  @Command('resumen')
+  async onResumen(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    try {
+      await ctx.sendChatAction('typing');
+      await this.telegramService.showResumen(ctx);
+    } catch (error) {
+      this.logger.error('Error al mostrar resumen', error);
+      await ctx.reply('⚠️ No pude obtener el resumen. Intenta de nuevo.');
+    }
+  }
+
+  @Command('pagar')
+  async onPagar(@Ctx() ctx: Context): Promise<void> {
+    if (!this.isAllowed(ctx)) { await ctx.reply('No autorizado.'); return; }
+    try {
+      await ctx.sendChatAction('typing');
+      await this.telegramService.showPendingDebts(ctx);
+    } catch (error) {
+      this.logger.error('Error al mostrar deudas pendientes', error);
+      await ctx.reply('⚠️ No pude obtener las deudas. Intenta de nuevo.');
+    }
   }
 
   @On('text')
