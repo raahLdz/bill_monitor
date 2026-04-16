@@ -312,7 +312,7 @@ export class SheetsService {
     config: TabConfig,
     expense: ParsedExpenseDto,
     lastTotal: number,
-  ): Promise<number | null> {
+  ): Promise<{ newTotal: number | null; rowIndex: number }> {
     let row: (string | number)[];
     let newTotal: number | null = null;
 
@@ -341,24 +341,30 @@ export class SheetsService {
     }
 
     const lastCol = String.fromCharCode(64 + row.length);
-    await sheets.spreadsheets.values.append({
+    const appendResponse = await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: `${config.name}!A:${lastCol}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [row] },
     });
 
+    // Parse the row number from the updated range (e.g. "'Gastos personales'!A5:C5" → 5)
+    const updatedRange = appendResponse.data.updates?.updatedRange ?? '';
+    const rowMatch = updatedRange.match(/!([A-Z]+)(\d+)/);
+    const rowIndex = rowMatch ? parseInt(rowMatch[2]) : 0;
+
     this.logger.log(
       `[${config.name}] ${expense.description} $${expense.amount}` +
-        (newTotal !== null ? ` | Saldo: $${newTotal}` : ''),
+        (newTotal !== null ? ` | Saldo: $${newTotal}` : '') +
+        ` | row ${rowIndex}`,
     );
 
-    return newTotal;
+    return { newTotal, rowIndex };
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
-  async appendExpense(expense: ParsedExpenseDto): Promise<number | null> {
+  async appendExpense(expense: ParsedExpenseDto): Promise<{ newTotal: number | null; rowIndex: number }> {
     const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
     const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
     const config = TAB_CONFIGS[expense.tab];
@@ -402,6 +408,39 @@ export class SheetsService {
     }
 
     return this.buildAndAppend(sheets, spreadsheetId, config, expense, lastTotal);
+  }
+
+  async deleteRow(
+    tab: 'departamento' | 'historial' | 'gastos_personales',
+    rowIndex: number,
+  ): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+    const tabName = TAB_CONFIGS[tab].name;
+
+    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheet = (spreadsheet.data.sheets ?? []).find(
+      (s) => s.properties?.title === tabName,
+    );
+    if (!sheet) throw new Error(`Pestaña "${tabName}" no encontrada`);
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: sheet.properties!.sheetId!,
+                dimension: 'ROWS',
+                startIndex: rowIndex - 1, // API is 0-based
+                endIndex: rowIndex,
+              },
+            },
+          },
+        ],
+      },
+    });
   }
 
   async getDepartamentoSaldo(): Promise<number | null> {

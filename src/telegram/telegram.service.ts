@@ -172,6 +172,20 @@ export class TelegramService {
       return;
     }
 
+    if (key === 'undo') {
+      const parts = data.split(':');
+      const tab = parts[2] as 'departamento' | 'historial' | 'gastos_personales';
+      const rowIndex = parseInt(parts[3]);
+      try {
+        await this.sheetsService.deleteRow(tab, rowIndex);
+        await ctx.reply('↩️ Registro eliminado.');
+      } catch (error) {
+        this.logger.error('Error al deshacer registro', error);
+        await ctx.reply('⚠️ No pude eliminar el registro. Intenta de nuevo.');
+      }
+      return;
+    }
+
     const state = this.flows.get(userId);
     if (!state) return;
 
@@ -461,9 +475,11 @@ export class TelegramService {
       status: state.status,
     };
 
+    let rowIndex = 0;
     try {
-      const newTotal = await this.sheetsService.appendExpense(expense);
-      await ctx.reply(this.confirm(expense, newTotal), { parse_mode: 'Markdown' });
+      const result = await this.sheetsService.appendExpense(expense);
+      rowIndex = result.rowIndex;
+      await ctx.reply(this.confirm(expense, result.newTotal), { parse_mode: 'Markdown' });
     } catch (error) {
       this.logger.error('Error al guardar en Sheets', error);
       const detail = error instanceof Error ? error.message : String(error);
@@ -475,11 +491,12 @@ export class TelegramService {
     }
 
     await ctx.reply(
-      '¿Quieres agregar otro registro?',
+      '¿Qué hacemos?',
       Markup.inlineKeyboard([
+        [Markup.button.callback('↩️ Deshacer', `flow:undo:${expense.tab}:${rowIndex}`)],
         [
-          Markup.button.callback('➕ Sí, otro', 'flow:again:yes'),
-          Markup.button.callback('✅ No, ya terminé', 'flow:again:no'),
+          Markup.button.callback('➕ Agregar otro', 'flow:again:yes'),
+          Markup.button.callback('✅ Terminar', 'flow:again:no'),
         ],
       ]),
     );
