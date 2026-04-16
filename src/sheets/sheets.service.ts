@@ -25,6 +25,14 @@ export interface PendingDebt {
   isMeDebe: boolean;
 }
 
+export interface RecurringExpense {
+  rowIndex: number;
+  concept: string;
+  amount: number;
+  dayOfMonth: number;
+  daysInAdvance: number;
+}
+
 export interface PersonDebtSummary {
   matchedName: string;
   meDeben: { concept: string; amount: number }[];
@@ -596,6 +604,112 @@ export class SheetsService {
       range: `Historial!F${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [['Pagada']] },
+    });
+  }
+
+  // ── Gastos fijos ───────────────────────────────────────────────────────────
+
+  private readonly GF_TAB = 'Gastos fijos';
+  private readonly GF_HEADERS = ['Concepto', 'Monto', 'Día del mes', 'Días de anticipación'];
+
+  private async ensureGastosFijosTab(
+    sheets: sheets_v4.Sheets,
+    spreadsheetId: string,
+  ): Promise<void> {
+    const { sheetId, isNew } = await this.ensureSheetExists(sheets, spreadsheetId, this.GF_TAB);
+    if (!isNew) return;
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+              fields: 'gridProperties.frozenRowCount',
+            },
+          },
+          {
+            updateDimensionProperties: {
+              range: { sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 },
+              properties: { pixelSize: 32 },
+              fields: 'pixelSize',
+            },
+          },
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 0.176, green: 0.459, blue: 0.733 },
+                  textFormat: {
+                    bold: true,
+                    fontSize: 11,
+                    foregroundColor: { red: 1, green: 1, blue: 1 },
+                  },
+                  horizontalAlignment: 'CENTER',
+                  verticalAlignment: 'MIDDLE',
+                },
+              },
+              fields:
+                'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+            },
+          },
+        ],
+      },
+    });
+
+    await this.writeHeaders(sheets, spreadsheetId, this.GF_TAB, this.GF_HEADERS);
+  }
+
+  async getRecurringExpenses(): Promise<RecurringExpense[]> {
+    try {
+      const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+      const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${this.GF_TAB}!A:D`,
+      });
+
+      const values = response.data.values ?? [];
+      const result: RecurringExpense[] = [];
+
+      for (let i = 1; i < values.length; i++) {
+        const row = values[i];
+        const concept = String(row[0] ?? '').trim();
+        if (!concept) continue;
+
+        result.push({
+          rowIndex: i + 1,
+          concept,
+          amount: parseFloat(String(row[1] ?? '0').replace(/[$,\s]/g, '')) || 0,
+          dayOfMonth: parseInt(String(row[2] ?? '1')) || 1,
+          daysInAdvance: parseInt(String(row[3] ?? '1')) || 1,
+        });
+      }
+
+      return result;
+    } catch {
+      return [];
+    }
+  }
+
+  async addRecurringExpense(
+    data: Omit<RecurringExpense, 'rowIndex'>,
+  ): Promise<void> {
+    const sheets = google.sheets({ version: 'v4', auth: this.getAuth() });
+    const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID')!;
+
+    await this.ensureGastosFijosTab(sheets, spreadsheetId);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${this.GF_TAB}!A:D`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[data.concept, data.amount, data.dayOfMonth, data.daysInAdvance]],
+      },
     });
   }
 }

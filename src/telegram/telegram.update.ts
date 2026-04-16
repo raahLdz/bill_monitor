@@ -38,7 +38,9 @@ export class TelegramUpdate {
         '/gastos — resumen de gastos personales del mes\n' +
         '/deuda Ricardo — balance pendiente con una persona\n' +
         '/pagar — marcar una deuda como pagada\n' +
-        '/cancelar — cancelar el registro en curso',
+        '/cancelar — cancelar el registro en curso\n\n' +
+        '⏰ Para agregar un *gasto fijo* con recordatorio automático,\n' +
+        'toca "⏰ Agregar gasto fijo" en el menú principal.',
       { parse_mode: 'Markdown' },
     );
   }

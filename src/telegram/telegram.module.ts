@@ -4,6 +4,7 @@ import { TelegrafModule } from 'nestjs-telegraf';
 import { SheetsModule } from '../sheets/sheets.module';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.update';
+import { SchedulerService } from './scheduler.service';
 
 @Module({
   imports: [
@@ -16,6 +17,6 @@ import { TelegramUpdate } from './telegram.update';
     }),
     SheetsModule,
   ],
-  providers: [TelegramService, TelegramUpdate],
+  providers: [TelegramService, TelegramUpdate, SchedulerService],
 })
 export class TelegramModule {}

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
-import { SheetsService, PendingDebt, PersonDebtSummary } from '../sheets/sheets.service';
+import { SheetsService, PendingDebt, PersonDebtSummary, RecurringExpense } from '../sheets/sheets.service';
 import { ParsedExpenseDto } from '../claude/dto/parsed-expense.dto';
 
 type FlowStep =
@@ -18,7 +18,11 @@ type FlowStep =
   | 'hist_status'
   | 'gp_date'
   | 'gp_concept'
-  | 'gp_amount';
+  | 'gp_amount'
+  | 'gf_concept'
+  | 'gf_amount'
+  | 'gf_day'
+  | 'gf_advance';
 
 // Steps that require a button tap — text input is ignored
 const BUTTON_STEPS: FlowStep[] = ['action', 'main', 'dep_type', 'hist_who', 'hist_status'];
@@ -33,6 +37,8 @@ interface FlowState {
   person?: string;
   debtDirection?: 'me_debe' | 'le_debo';
   status?: 'Pagada' | 'Pendiente';
+  dayOfMonth?: number;
+  daysInAdvance?: number;
 }
 
 @Injectable()
@@ -129,6 +135,45 @@ export class TelegramService {
         await this.save(userId, state, ctx);
         break;
       }
+
+      // ── Gastos fijos ───────────────────────────────────────────────
+      case 'gf_concept':
+        state.concept = t;
+        state.step = 'gf_amount';
+        await this.askAmount(ctx);
+        break;
+
+      case 'gf_amount': {
+        const n = this.parseAmount(t);
+        if (!n) { await this.badAmount(ctx); return; }
+        state.amount = n;
+        state.step = 'gf_day';
+        await ctx.reply('📅 ¿Qué día del mes vence? (1–31)');
+        break;
+      }
+
+      case 'gf_day': {
+        const day = parseInt(t);
+        if (isNaN(day) || day < 1 || day > 31) {
+          await ctx.reply('⚠️ Escribe un número entre 1 y 31.');
+          return;
+        }
+        state.dayOfMonth = day;
+        state.step = 'gf_advance';
+        await ctx.reply('🔔 ¿Con cuántos días de anticipación quieres el recordatorio?\nEscribe 0 para que llegue el mismo día.');
+        break;
+      }
+
+      case 'gf_advance': {
+        const days = parseInt(t);
+        if (isNaN(days) || days < 0) {
+          await ctx.reply('⚠️ Escribe 0 o un número mayor.');
+          return;
+        }
+        state.daysInAdvance = days;
+        await this.saveRecurring(userId, state, ctx);
+        break;
+      }
     }
   }
 
@@ -156,10 +201,53 @@ export class TelegramService {
       if (value === 'registro') {
         this.flows.set(userId, { step: 'main' });
         await this.askTabs(ctx);
+      } else if (value === 'gastos_fijos') {
+        this.flows.set(userId, { step: 'gf_concept' });
+        await ctx.reply('📝 ¿Cuál es el nombre del gasto fijo? (ej: Netflix, Gym, Renta)');
       } else {
         this.flows.delete(userId);
         await this.showPendingDebts(ctx);
       }
+      return;
+    }
+
+    if (key === 'register_fixed') {
+      const rowIndex = parseInt(value);
+      try {
+        const expenses = await this.sheetsService.getRecurringExpenses();
+        const expense = expenses.find((e: RecurringExpense) => e.rowIndex === rowIndex);
+        if (!expense) {
+          await ctx.reply('⚠️ No encontré ese gasto fijo. Puede que haya sido eliminado del sheet.');
+          return;
+        }
+        const parsed: ParsedExpenseDto = {
+          tab: 'gastos_personales',
+          type: 'gasto',
+          amount: expense.amount,
+          description: expense.concept,
+          date: this.today(),
+        };
+        const { newTotal, rowIndex: newRow } = await this.sheetsService.appendExpense(parsed);
+        await ctx.reply(this.confirm(parsed, newTotal), { parse_mode: 'Markdown' });
+        await ctx.reply(
+          '¿Qué hacemos?',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('↩️ Deshacer', `flow:undo:gastos_personales:${newRow}`)],
+            [
+              Markup.button.callback('➕ Agregar otro', 'flow:again:yes'),
+              Markup.button.callback('✅ Terminar', 'flow:again:no'),
+            ],
+          ]),
+        );
+      } catch (error) {
+        this.logger.error('Error al registrar gasto fijo', error);
+        await ctx.reply('⚠️ No pude registrar el gasto. Intenta de nuevo.');
+      }
+      return;
+    }
+
+    if (key === 'ignore_fixed') {
+      await ctx.reply('⏭️ Recordatorio ignorado.');
       return;
     }
 
@@ -415,6 +503,7 @@ export class TelegramService {
       Markup.inlineKeyboard([
         [Markup.button.callback('➕ Anotar un movimiento', 'flow:action:registro')],
         [Markup.button.callback('✏️ Actualizar un registro', 'flow:action:actualizar')],
+        [Markup.button.callback('⏰ Agregar gasto fijo', 'flow:action:gastos_fijos')],
       ]),
     );
   }
@@ -497,6 +586,32 @@ export class TelegramService {
   }
 
   // ── Save & confirm ─────────────────────────────────────────────────────────
+
+  private async saveRecurring(userId: number, state: FlowState, ctx: Context): Promise<void> {
+    this.flows.delete(userId);
+    const fmt = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: 2 })}`;
+
+    try {
+      await this.sheetsService.addRecurringExpense({
+        concept: state.concept!,
+        amount: state.amount!,
+        dayOfMonth: state.dayOfMonth!,
+        daysInAdvance: state.daysInAdvance ?? 1,
+      });
+
+      await ctx.reply(
+        `✅ *Gasto fijo guardado*\n\n` +
+          `📝 ${state.concept}\n` +
+          `💵 ${fmt(state.amount!)}\n` +
+          `📅 Día ${state.dayOfMonth} de cada mes\n` +
+          `🔔 Recordatorio ${state.daysInAdvance} día(s) antes`,
+        { parse_mode: 'Markdown' },
+      );
+    } catch (error) {
+      this.logger.error('Error al guardar gasto fijo', error);
+      await ctx.reply('⚠️ No pude guardar el gasto fijo. Intenta de nuevo.');
+    }
+  }
 
   private async save(userId: number, state: FlowState, ctx: Context): Promise<void> {
     this.flows.delete(userId);
